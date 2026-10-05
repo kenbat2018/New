@@ -6,6 +6,7 @@ from numba import njit
 CAP=100000.0
 FEE=0.0005
 SLIP=10.0
+TIMEFRAMES=["15min","30min","1h","2h","4h","6h","12h","1d"]
 
 @njit(cache=True)
 def sim(o,h,l,c,tr,yi,L,M,fee,slip):
@@ -17,16 +18,6 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
     csum=np.empty(n+1); csum[0]=0.0
     for i in range(n): csum[i+1]=csum[i]+tr[i]
 
-    def mark(px,y,cash,pos,peak,maxdd,yp,ymdd):
-        eq=cash+pos*px
-        if eq>peak: peak=eq
-        dd=eq/peak-1.0 if peak>0 else -1.0
-        if dd<maxdd: maxdd=dd
-        if math.isnan(yp[y]) or eq>yp[y]: yp[y]=eq
-        ddy=eq/yp[y]-1.0 if yp[y]>0 else -1.0
-        if ddy<ymdd[y]: ymdd[y]=ddy
-        return eq,peak,maxdd
-
     for j in range(L+1,n):
         y=yi[j]
         eqo=cash+pos*o[j]
@@ -35,18 +26,14 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
         i=j-1
         atr=(csum[i+1]-csum[i+1-L])/L
         up=c[i]+atr*M; dn=c[i]-atr*M
-
-        # Both stop-entry orders are live for the bar. TradingView can fill both
-        # sequentially in one OHLC path, reversing twice without recalculation.
         buy_active=True; sell_active=True
-        # TV default synthetic path: open -> nearest extreme -> far extreme -> close.
+
         if abs(o[j]-h[j]) <= abs(o[j]-l[j]):
             p1=h[j]; p2=l[j]
         else:
             p1=l[j]; p2=h[j]
 
-        # helper implemented as repeated inline blocks because numba nested mutation is awkward
-        # open-gap events
+        # open gap fills
         if buy_active and o[j]>=up:
             buy_active=False
             if direction!=1:
@@ -62,7 +49,7 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
                     if pnl>0: gp[y]+=pnl; wy[y]+=1
                     elif pnl<0: gl[y]+=-pnl
                 cash-=delta*fill+comm; pos=target; direction=1; ep=fill; ecomm=fee*abs(target)*fill
-        elif sell_active and o[j]<=dn:
+        if sell_active and o[j]<=dn:
             sell_active=False
             if direction!=-1:
                 fill=o[j]-slip
@@ -79,9 +66,15 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
                     elif pnl<0: gl[y]+=-pnl
                 cash-=delta*fill+comm; pos=target; direction=-1; ep=fill; ecomm=fee*abs(target)*fill
 
-        eq,peak,maxdd=mark(o[j],y,cash,pos,peak,maxdd,yp,ymdd)
+        # mark at open
+        eq=cash+pos*o[j]
+        if eq>peak: peak=eq
+        dd=eq/peak-1.0 if peak>0 else -1.0
+        if dd<maxdd: maxdd=dd
+        if math.isnan(yp[y]) or eq>yp[y]: yp[y]=eq
+        ddy=eq/yp[y]-1.0 if yp[y]>0 else -1.0
+        if ddy<ymdd[y]: ymdd[y]=ddy
 
-        # Walk three segments. Only buy stop can trigger on up segments and sell stop on down segments.
         a=o[j]
         pts=(p1,p2,c[j])
         for kk in range(3):
@@ -102,7 +95,6 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
                             if pnl>0: gp[y]+=pnl; wy[y]+=1
                             elif pnl<0: gl[y]+=-pnl
                         cash-=delta*fill+comm; pos=target; direction=1; ep=fill; ecomm=fee*abs(target)*fill
-                        eq,peak,maxdd=mark(fill,y,cash,pos,peak,maxdd,yp,ymdd)
             elif b<a:
                 if sell_active and b<=dn and dn<a:
                     sell_active=False
@@ -120,13 +112,17 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
                             if pnl>0: gp[y]+=pnl; wy[y]+=1
                             elif pnl<0: gl[y]+=-pnl
                         cash-=delta*fill+comm; pos=target; direction=-1; ep=fill; ecomm=fee*abs(target)*fill
-                        eq,peak,maxdd=mark(fill,y,cash,pos,peak,maxdd,yp,ymdd)
-            eq,peak,maxdd=mark(b,y,cash,pos,peak,maxdd,yp,ymdd)
+
+            eq=cash+pos*b
+            if eq>peak: peak=eq
+            dd=eq/peak-1.0 if peak>0 else -1.0
+            if dd<maxdd: maxdd=dd
+            if math.isnan(yp[y]) or eq>yp[y]: yp[y]=eq
+            ddy=eq/yp[y]-1.0 if yp[y]>0 else -1.0
+            if ddy<ymdd[y]: ymdd[y]=ddy
             a=b
 
         ye[y]=cash+pos*c[j]
-
-        # A 1x strategy should not be allowed to continue with negative equity.
         if ye[y]<=0:
             for yy in range(y,ny):
                 if math.isnan(ys[yy]): ys[yy]=0.0
@@ -157,72 +153,104 @@ def run(df,L,M,fee=FEE,slip=SLIP):
         annual[int(y)]={"return":float(rr),"maxdd":float(ymdd[k]),"pf":float(pfy),"trades":int(ty[k]),"wins":int(wy[k])}
     return {"length":int(L),"mult":float(M),"return":float(ret),"maxdd":float(mdd),"pf":float(pf),"trades":int(trades),"end_equity":float(endeq),"annual":annual}
 
-def stats_years(r,years):
-    a=[r["annual"].get(y,{}) for y in years]
-    a=[x for x in a if np.isfinite(x.get("return",np.nan))]
-    if not a:
-        return {"median":-9.0,"mean":-9.0,"std":9.0,"worst":-9.0,"pos":0,"maxdd":-1.0,"trades":0,"medianpf":0.0}
-    re=np.array([x["return"] for x in a]); dd=np.array([x["maxdd"] for x in a]); pfs=np.array([min(x["pf"],20) for x in a])
+def yearly_stats(r,years):
+    vals=[r["annual"].get(y) for y in years]
+    vals=[x for x in vals if x and np.isfinite(x["return"])]
+    if not vals: return None
+    re=np.array([x["return"] for x in vals]); dd=np.array([x["maxdd"] for x in vals]); pf=np.array([min(x["pf"],10) for x in vals])
     return {"median":float(np.median(re)),"mean":float(np.mean(re)),"std":float(np.std(re)),"worst":float(np.min(re)),
-            "pos":int((re>0).sum()),"maxdd":float(np.min(dd)),"trades":int(sum(x["trades"] for x in a)),"medianpf":float(np.median(pfs))}
+            "positive_years":int((re>0).sum()),"max_year_dd":float(np.min(dd)),"trades":int(sum(x["trades"] for x in vals)),
+            "median_pf":float(np.median(pf))}
 
-def main(path):
-    df=pd.read_parquet(path)
-    df["datetime"]=pd.to_datetime(df["datetime"],utc=True); df=df.set_index("datetime").sort_index()
-    df=df[~df.index.duplicated(keep="last")]
-    df=df.loc[(df.index>=pd.Timestamp("2020-01-01",tz="UTC"))&(df.index<pd.Timestamp("2026-10-01",tz="UTC"))]
-    df=df[["open","high","low","close"]].astype(float).dropna()
-    print("DATA",len(df),df.index[0],df.index[-1],flush=True)
-    run(df.iloc[:3000],5,4.5)
+def resample_ohlc(df,tf):
+    if tf=="15min": return df.copy()
+    rule={"30min":"30min","1h":"1h","2h":"2h","4h":"4h","6h":"6h","12h":"12h","1d":"1D"}[tf]
+    z=df.resample(rule,label="left",closed="left").agg({"open":"first","high":"max","low":"min","close":"last"}).dropna()
+    return z
 
+def grid_one(df,tf):
     rows=[]
     for L in range(2,41):
         for M in np.arange(.5,8.0001,.25):
-            r=run(df,L,float(M)); d=stats_years(r,[2020,2021,2022,2023,2024]); s6=stats_years(r,[2020,2021,2022,2023,2024,2025])
-            capped=np.clip(np.array([r["annual"][y]["return"] for y in [2020,2021,2022,2023,2024]]),-.75,1.5)
-            score=float(np.median(capped)-.30*np.std(capped)-.30*abs(d["maxdd"])+.10*np.min(capped))
+            r=run(df,L,float(M))
+            d=yearly_stats(r,[2020,2021,2022,2023,2024])
+            if d is None: continue
+            devrets=np.array([r["annual"][y]["return"] for y in [2020,2021,2022,2023,2024]])
+            capped=np.clip(devrets,-.75,1.5)
+            # reward durable return, penalize dispersion and drawdown
+            score=float(np.median(capped)-.25*np.std(capped)-.25*abs(d["max_year_dd"])+.10*np.min(capped))
             rows.append({"length":L,"mult":round(float(M),2),"score":score,
-                         "dev_pos":d["pos"],"dev_median":d["median"],"dev_worst":d["worst"],"dev_dd":d["maxdd"],"dev_trades":d["trades"],"dev_pf":d["medianpf"],
-                         "six_pos":s6["pos"],"six_median":s6["median"],"six_worst":s6["worst"],"six_dd":s6["maxdd"],"full_dd":r["maxdd"]})
+                         "dev_pos":d["positive_years"],"dev_median":d["median"],"dev_mean":d["mean"],
+                         "dev_worst":d["worst"],"dev_dd":d["max_year_dd"],"dev_trades":d["trades"],"dev_pf":d["median_pf"]})
     g=pd.DataFrame(rows)
     plats=[]; shares=[]
     for _,x in g.iterrows():
         n=g[(g.length.between(x.length-2,x.length+2))&(g.mult.between(x.mult-.5,x.mult+.5))]
         plats.append(float(n.score.median()))
-        shares.append(float(((n.dev_pos>=4)&(n.dev_pf>1.0)).mean()))
-    g["plateau"]=plats; g["robust_neighbor_share"]=shares
+        shares.append(float(((n.dev_pos>=3)&(n.dev_pf>=.9)&(n.dev_dd>-.75)).mean()))
+    g["plateau"]=plats; g["neighbor_share"]=shares
 
-    # Strict no-overfit ranking: only 2020-24 used. 2025 and 2026 only reported afterward.
-    cand=g[(g.dev_pos>=4)&(g.dev_trades>=80)&(g.dev_pf>1.0)&(g.dev_dd>-.60)&(g.robust_neighbor_share>=.45)]
-    if len(cand)==0:
-        cand=g[(g.dev_pos>=4)&(g.dev_trades>=50)&(g.dev_pf>1.0)&(g.dev_dd>-.70)]
+    # Adaptive minimum trades: high timeframes naturally produce fewer.
+    mintr={"15min":80,"30min":60,"1h":40,"2h":25,"4h":15,"6h":12,"12h":8,"1d":5}[tf]
+    cand=g[(g.dev_pos>=3)&(g.dev_trades>=mintr)&(g.dev_pf>=.9)&(g.dev_dd>-.75)]
+    if len(cand)==0: cand=g[(g.dev_trades>=mintr)&(g.dev_dd>-.85)]
     cand=cand.sort_values(["plateau","score"],ascending=False)
 
-    top=[]
-    for rank,(_,x) in enumerate(cand.head(10).iterrows(),1):
+    out=[]
+    for rank,(_,x) in enumerate(cand.head(5).iterrows(),1):
         r=run(df,int(x.length),float(x.mult))
-        top.append({"dev_rank":rank,"length":int(x.length),"mult":float(x.mult),"plateau":float(x.plateau),"robust_neighbor_share":float(x.robust_neighbor_share),
-                    "development":stats_years(r,[2020,2021,2022,2023,2024]),
+        out.append({"rank":rank,"length":int(x.length),"mult":float(x.mult),
+                    "plateau":float(x.plateau),"neighbor_share":float(x.neighbor_share),
+                    "development":yearly_stats(r,[2020,2021,2022,2023,2024]),
                     "y2025":r["annual"].get(2025,{}),"y2026":r["annual"].get(2026,{}),
-                    "annual":r["annual"],"full":{"return":r["return"],"maxdd":r["maxdd"],"pf":r["pf"],"trades":r["trades"]}})
+                    "annual":r["annual"],
+                    "full":{"return":r["return"],"maxdd":r["maxdd"],"pf":r["pf"],"trades":r["trades"]}})
+    return out,g
 
-    # Descriptive list specifically matching the user's tolerance: positive in >=5 of 6 completed years.
-    six=g[(g.six_pos>=5)&(g.dev_trades>=50)&(g.dev_pf>1.0)&(g.six_dd>-.75)].sort_values(["plateau","score"],ascending=False)
-    five=[]
-    for rank,(_,x) in enumerate(six.head(20).iterrows(),1):
-        r=run(df,int(x.length),float(x.mult))
-        five.append({"rank":rank,"length":int(x.length),"mult":float(x.mult),"six_positive_years":int(x.six_pos),
-                     "annual":{str(y):r["annual"].get(y,{}) for y in range(2020,2027)},
-                     "full":{"return":r["return"],"maxdd":r["maxdd"],"pf":r["pf"],"trades":r["trades"]},
-                     "plateau":float(x.plateau),"robust_neighbor_share":float(x.robust_neighbor_share)})
-    out={"data":{"rows":len(df),"start":str(df.index[0]),"end":str(df.index[-1]),"source":"Binance spot BTCUSDT 15m via vaquum/HuggingFace"},
-         "execution":{"capital":CAP,"commission_pct":FEE*100,"slippage_usd":SLIP,"bar_model":"TradingView default OHLC path with both stop orders allowed to fill sequentially","size":"100% equity","leverage":"1x"},
-         "protocol":{"grid":"length 2..40, multiplier 0.5..8.0 step 0.25","development":"2020-2024 used for ranking","oos":"2025 and 2026 not used to rank",
-                     "plateau":"median score within ±2 length and ±0.5 multiplier neighborhood"},
-         "top_dev_robust":top,"five_of_six":five,"count_five_of_six":int(len(six)),
-         "current_5_4_5":run(df,5,4.5)}
-    Path("volty_results.json").write_text(json.dumps(out,indent=2))
-    g.to_csv("volty_top100.csv",index=False)
-    print("RESULT_JSON_BEGIN"); print(json.dumps(out)); print("RESULT_JSON_END",flush=True)
+def main(path):
+    raw=pd.read_parquet(path)
+    raw["datetime"]=pd.to_datetime(raw["datetime"],utc=True); raw=raw.set_index("datetime").sort_index()
+    raw=raw[~raw.index.duplicated(keep="last")]
+    raw=raw.loc[(raw.index>=pd.Timestamp("2020-01-01",tz="UTC"))&(raw.index<pd.Timestamp("2026-10-01",tz="UTC"))]
+    raw=raw[["open","high","low","close"]].astype(float).dropna()
+    print("RAW",len(raw),raw.index[0],raw.index[-1],flush=True)
+
+    results={}
+    summaries=[]
+    allgrids=[]
+    for tf in TIMEFRAMES:
+        df=resample_ohlc(raw,tf)
+        print("TF",tf,"bars",len(df),flush=True)
+        # warm numba
+        run(df.iloc[:min(3000,len(df))],5,4.5)
+        top,g=grid_one(df,tf)
+        results[tf]={"bars":len(df),"top5":top}
+        gg=g.copy(); gg["timeframe"]=tf; allgrids.append(gg)
+        if top:
+            b=top[0]
+            summaries.append({"timeframe":tf,"length":b["length"],"mult":b["mult"],
+                              "dev_positive_years":b["development"]["positive_years"],
+                              "dev_median_return":b["development"]["median"],
+                              "dev_worst_return":b["development"]["worst"],
+                              "dev_max_year_dd":b["development"]["max_year_dd"],
+                              "oos_2025_return":b["y2025"].get("return"),"oos_2025_dd":b["y2025"].get("maxdd"),
+                              "2026_return":b["y2026"].get("return"),"2026_dd":b["y2026"].get("maxdd"),
+                              "full_return":b["full"]["return"],"full_dd":b["full"]["maxdd"],"full_pf":b["full"]["pf"],"trades":b["full"]["trades"]})
+
+    # Do not use 2025/26 to choose. Overall candidate is based strictly on dev plateau/score,
+    # with a small preference for lower drawdown and enough trades.
+    sdf=pd.DataFrame(summaries)
+    out={"data":{"rows":len(raw),"start":str(raw.index[0]),"end":str(raw.index[-1]),"source":"Binance spot BTCUSDT 15m; higher timeframes resampled from 15m"},
+         "execution":{"capital":CAP,"commission_pct":FEE*100,"slippage_usd":SLIP,"size":"100% equity","leverage":"1x",
+                      "bar_model":"TradingView default synthetic OHLC path; both stop orders may reverse intrabar"},
+         "protocol":{"timeframes":TIMEFRAMES,"grid":"length 2..40, multiplier .5..8.0 step .25",
+                     "development":"2020-2024 selects params separately inside each timeframe",
+                     "oos":"2025 is untouched validation and 2026 is report-only; neither reorders candidates",
+                     "warning":"testing multiple timeframes is another model-selection layer, so OOS behavior matters more than dev winner"},
+         "summary":summaries,"results":results}
+    Path("multitf_results.json").write_text(json.dumps(out,indent=2))
+    sdf.to_csv("multitf_summary.csv",index=False)
+    pd.concat(allgrids,ignore_index=True).to_csv("multitf_grid.csv",index=False)
+    print("MULTITF_JSON_BEGIN"); print(json.dumps(out)); print("MULTITF_JSON_END",flush=True)
 
 if __name__=="__main__": main(sys.argv[1])
