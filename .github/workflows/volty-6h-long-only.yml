@@ -1,0 +1,28 @@
+name: volty-6h-long-only
+on:
+  push:
+    paths:
+      - ".github/workflows/volty-6h-long-only.yml"
+      - "volty_6h_long_only.py"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -q numpy pandas numba
+      - name: Run long-only optimization
+        run: python volty_6h_long_only.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volty-6h-long-only
+          path: |
+            volty_6h_long_only.json
+            volty_6h_long_only_grid.csv
+            volty_6h_long_only_ledger.json
