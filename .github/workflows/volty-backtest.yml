@@ -1,0 +1,31 @@
+name: volty-backtest
+on:
+  push:
+    paths:
+      - ".github/workflows/volty-backtest.yml"
+      - "volty_backtest.py"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -q numpy pandas pyarrow numba
+      - name: Download BTC 15m dataset
+        run: |
+          curl -L --fail --retry 3 -o btcusdt.parquet "https://huggingface.co/datasets/vaquum/binance_btcusdt_15m_klines/resolve/main/btcusdt_15m_kline_20200101_to_20261003.parquet?download=true"
+          ls -lh btcusdt.parquet
+      - name: Run robustness search
+        run: python volty_backtest.py btcusdt.parquet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volty-results
+          path: |
+            volty_results.json
+            volty_top100.csv
