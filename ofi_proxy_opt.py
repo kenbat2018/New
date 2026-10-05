@@ -5,7 +5,7 @@ import pandas as pd
 from numba import njit
 from huggingface_hub import snapshot_download
 
-REPO="ibrahimdaud/binance-btcusdt"
+REPO="ibrahimdaud/btcusdt-futures-features"
 TICK=0.01
 FEE=0.0005
 SLIP_BPS=1.0
