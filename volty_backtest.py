@@ -16,6 +16,17 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
     gp=np.zeros(ny); gl=np.zeros(ny); ty=np.zeros(ny,np.int64); wy=np.zeros(ny,np.int64)
     csum=np.empty(n+1); csum[0]=0.0
     for i in range(n): csum[i+1]=csum[i]+tr[i]
+
+    def mark(px,y,cash,pos,peak,maxdd,yp,ymdd):
+        eq=cash+pos*px
+        if eq>peak: peak=eq
+        dd=eq/peak-1.0 if peak>0 else -1.0
+        if dd<maxdd: maxdd=dd
+        if math.isnan(yp[y]) or eq>yp[y]: yp[y]=eq
+        ddy=eq/yp[y]-1.0 if yp[y]>0 else -1.0
+        if ddy<ymdd[y]: ymdd[y]=ddy
+        return eq,peak,maxdd
+
     for j in range(L+1,n):
         y=yi[j]
         eqo=cash+pos*o[j]
@@ -24,54 +35,109 @@ def sim(o,h,l,c,tr,yi,L,M,fee,slip):
         i=j-1
         atr=(csum[i+1]-csum[i+1-L])/L
         up=c[i]+atr*M; dn=c[i]-atr*M
-        td=0; base=0.0
-        if direction==1:
-            if o[j]<=dn: td=-1; base=o[j]
-            elif l[j]<=dn: td=-1; base=dn
-        elif direction==-1:
-            if o[j]>=up: td=1; base=o[j]
-            elif h[j]>=up: td=1; base=up
+
+        # Both stop-entry orders are live for the bar. TradingView can fill both
+        # sequentially in one OHLC path, reversing twice without recalculation.
+        buy_active=True; sell_active=True
+        # TV default synthetic path: open -> nearest extreme -> far extreme -> close.
+        if abs(o[j]-h[j]) <= abs(o[j]-l[j]):
+            p1=h[j]; p2=l[j]
         else:
-            if o[j]>=up: td=1; base=o[j]
-            elif o[j]<=dn: td=-1; base=o[j]
-            else:
-                high_first=abs(o[j]-h[j])<=abs(o[j]-l[j])
-                if high_first:
-                    if h[j]>=up: td=1; base=up
-                    elif l[j]<=dn: td=-1; base=dn
-                else:
-                    if l[j]<=dn: td=-1; base=dn
-                    elif h[j]>=up: td=1; base=up
-        if td!=0 and td!=direction:
-            fill=base+slip if td==1 else base-slip
-            if fill<=0: fill=max(base,0.01)
-            eqpre=cash+pos*fill
-            target=td*(eqpre/fill)
-            delta=target-pos
-            comm=fee*abs(delta)*fill
-            if direction!=0:
-                close_comm=fee*abs(pos)*fill
-                pnl=pos*(fill-ep)-ecomm-close_comm
-                ty[y]+=1
-                if pnl>0: gp[y]+=pnl; wy[y]+=1
-                elif pnl<0: gl[y]+=-pnl
-            cash-=delta*fill+comm
-            pos=target; direction=td; ep=fill
-            ecomm=fee*abs(target)*fill
-        eq=cash+pos*c[j]
-        if eq>peak: peak=eq
-        dd=eq/peak-1.0 if peak>0 else -1.0
-        if dd<maxdd: maxdd=dd
-        if math.isnan(yp[y]) or eq>yp[y]: yp[y]=eq
-        ddy=eq/yp[y]-1.0 if yp[y]>0 else -1.0
-        if ddy<ymdd[y]: ymdd[y]=ddy
-        ye[y]=eq
-        if eq<=0:
+            p1=l[j]; p2=h[j]
+
+        # helper implemented as repeated inline blocks because numba nested mutation is awkward
+        # open-gap events
+        if buy_active and o[j]>=up:
+            buy_active=False
+            if direction!=1:
+                fill=o[j]+slip
+                eqpre=cash+pos*fill
+                target=eqpre/fill
+                delta=target-pos
+                comm=fee*abs(delta)*fill
+                if direction!=0:
+                    close_comm=fee*abs(pos)*fill
+                    pnl=pos*(fill-ep)-ecomm-close_comm
+                    ty[y]+=1
+                    if pnl>0: gp[y]+=pnl; wy[y]+=1
+                    elif pnl<0: gl[y]+=-pnl
+                cash-=delta*fill+comm; pos=target; direction=1; ep=fill; ecomm=fee*abs(target)*fill
+        elif sell_active and o[j]<=dn:
+            sell_active=False
+            if direction!=-1:
+                fill=o[j]-slip
+                if fill<=0: fill=0.01
+                eqpre=cash+pos*fill
+                target=-eqpre/fill
+                delta=target-pos
+                comm=fee*abs(delta)*fill
+                if direction!=0:
+                    close_comm=fee*abs(pos)*fill
+                    pnl=pos*(fill-ep)-ecomm-close_comm
+                    ty[y]+=1
+                    if pnl>0: gp[y]+=pnl; wy[y]+=1
+                    elif pnl<0: gl[y]+=-pnl
+                cash-=delta*fill+comm; pos=target; direction=-1; ep=fill; ecomm=fee*abs(target)*fill
+
+        eq,peak,maxdd=mark(o[j],y,cash,pos,peak,maxdd,yp,ymdd)
+
+        # Walk three segments. Only buy stop can trigger on up segments and sell stop on down segments.
+        a=o[j]
+        pts=(p1,p2,c[j])
+        for kk in range(3):
+            b=pts[kk]
+            if b>a:
+                if buy_active and a<up and up<=b:
+                    buy_active=False
+                    if direction!=1:
+                        fill=up+slip
+                        eqpre=cash+pos*fill
+                        target=eqpre/fill
+                        delta=target-pos
+                        comm=fee*abs(delta)*fill
+                        if direction!=0:
+                            close_comm=fee*abs(pos)*fill
+                            pnl=pos*(fill-ep)-ecomm-close_comm
+                            ty[y]+=1
+                            if pnl>0: gp[y]+=pnl; wy[y]+=1
+                            elif pnl<0: gl[y]+=-pnl
+                        cash-=delta*fill+comm; pos=target; direction=1; ep=fill; ecomm=fee*abs(target)*fill
+                        eq,peak,maxdd=mark(fill,y,cash,pos,peak,maxdd,yp,ymdd)
+            elif b<a:
+                if sell_active and b<=dn and dn<a:
+                    sell_active=False
+                    if direction!=-1:
+                        fill=dn-slip
+                        if fill<=0: fill=0.01
+                        eqpre=cash+pos*fill
+                        target=-eqpre/fill
+                        delta=target-pos
+                        comm=fee*abs(delta)*fill
+                        if direction!=0:
+                            close_comm=fee*abs(pos)*fill
+                            pnl=pos*(fill-ep)-ecomm-close_comm
+                            ty[y]+=1
+                            if pnl>0: gp[y]+=pnl; wy[y]+=1
+                            elif pnl<0: gl[y]+=-pnl
+                        cash-=delta*fill+comm; pos=target; direction=-1; ep=fill; ecomm=fee*abs(target)*fill
+                        eq,peak,maxdd=mark(fill,y,cash,pos,peak,maxdd,yp,ymdd)
+            eq,peak,maxdd=mark(b,y,cash,pos,peak,maxdd,yp,ymdd)
+            a=b
+
+        ye[y]=cash+pos*c[j]
+
+        # A 1x strategy should not be allowed to continue with negative equity.
+        if ye[y]<=0:
             for yy in range(y,ny):
                 if math.isnan(ys[yy]): ys[yy]=0.0
-                ye[yy]=0.0; yp[yy]=0.0; ymdd[yy]=-1.0
+                ye[yy]=0.0
+                if math.isnan(yp[yy]): yp[yy]=0.0
+                ymdd[yy]=-1.0
+            cash=0.0; pos=0.0; direction=0
             break
+
     endeq=cash+pos*c[-1]
+    if endeq<0: endeq=0.0
     gpt=gp.sum(); glt=gl.sum()
     pf=gpt/glt if glt>0 else (999.0 if gpt>0 else 0.0)
     return endeq,endeq/CAP-1,maxdd,pf,ty.sum(),ys,ye,ymdd,gp,gl,ty,wy
@@ -91,13 +157,14 @@ def run(df,L,M,fee=FEE,slip=SLIP):
         annual[int(y)]={"return":float(rr),"maxdd":float(ymdd[k]),"pf":float(pfy),"trades":int(ty[k]),"wins":int(wy[k])}
     return {"length":int(L),"mult":float(M),"return":float(ret),"maxdd":float(mdd),"pf":float(pf),"trades":int(trades),"end_equity":float(endeq),"annual":annual}
 
-def devstats(r):
-    a=[r["annual"][y] for y in [2020,2021,2022,2023,2024]]
+def stats_years(r,years):
+    a=[r["annual"].get(y,{}) for y in years]
+    a=[x for x in a if np.isfinite(x.get("return",np.nan))]
+    if not a:
+        return {"median":-9.0,"mean":-9.0,"std":9.0,"worst":-9.0,"pos":0,"maxdd":-1.0,"trades":0,"medianpf":0.0}
     re=np.array([x["return"] for x in a]); dd=np.array([x["maxdd"] for x in a]); pfs=np.array([min(x["pf"],20) for x in a])
-    capped=np.clip(re,-.75,1.5)
-    score=float(np.median(capped)-.35*np.std(capped)-.35*abs(np.min(dd))+.10*np.min(capped))
-    return dict(score=score,median=float(np.median(re)),mean=float(np.mean(re)),std=float(np.std(re)),worst=float(np.min(re)),
-                posyears=int((re>0).sum()),maxyeardd=float(np.min(dd)),trades=int(sum(x["trades"] for x in a)),medianpf=float(np.median(pfs)))
+    return {"median":float(np.median(re)),"mean":float(np.mean(re)),"std":float(np.std(re)),"worst":float(np.min(re)),
+            "pos":int((re>0).sum()),"maxdd":float(np.min(dd)),"trades":int(sum(x["trades"] for x in a)),"medianpf":float(np.median(pfs))}
 
 def main(path):
     df=pd.read_parquet(path)
@@ -106,41 +173,56 @@ def main(path):
     df=df.loc[(df.index>=pd.Timestamp("2020-01-01",tz="UTC"))&(df.index<pd.Timestamp("2026-10-01",tz="UTC"))]
     df=df[["open","high","low","close"]].astype(float).dropna()
     print("DATA",len(df),df.index[0],df.index[-1],flush=True)
-    run(df.iloc[:2000],5,4.5)
+    run(df.iloc[:3000],5,4.5)
+
     rows=[]
-    for L in range(2,31):
+    for L in range(2,41):
         for M in np.arange(.5,8.0001,.25):
-            r=run(df,L,float(M)); s=devstats(r)
-            rows.append({"length":L,"mult":round(float(M),2),**s})
+            r=run(df,L,float(M)); d=stats_years(r,[2020,2021,2022,2023,2024]); s6=stats_years(r,[2020,2021,2022,2023,2024,2025])
+            capped=np.clip(np.array([r["annual"][y]["return"] for y in [2020,2021,2022,2023,2024]]),-.75,1.5)
+            score=float(np.median(capped)-.30*np.std(capped)-.30*abs(d["maxdd"])+.10*np.min(capped))
+            rows.append({"length":L,"mult":round(float(M),2),"score":score,
+                         "dev_pos":d["pos"],"dev_median":d["median"],"dev_worst":d["worst"],"dev_dd":d["maxdd"],"dev_trades":d["trades"],"dev_pf":d["medianpf"],
+                         "six_pos":s6["pos"],"six_median":s6["median"],"six_worst":s6["worst"],"six_dd":s6["maxdd"],"full_dd":r["maxdd"]})
     g=pd.DataFrame(rows)
-    g["eligible"]=(g.posyears>=4)&(g.trades>=40)&(g.medianpf>1.0)&(g.maxyeardd>-.50)
-    plat=[]; share=[]; nn=[]
+    plats=[]; shares=[]
     for _,x in g.iterrows():
         n=g[(g.length.between(x.length-2,x.length+2))&(g.mult.between(x.mult-.5,x.mult+.5))]
-        plat.append(float(n.score.median())); share.append(float((n.score>0).mean())); nn.append(len(n))
-    g["plateau"]=plat; g["neighbor_positive_share"]=share; g["neighbor_n"]=nn
-    c=g[g.eligible&(g.neighbor_positive_share>=.70)].sort_values(["plateau","score"],ascending=False)
-    if len(c)==0: c=g[g.eligible].sort_values(["plateau","score"],ascending=False)
-    if len(c)==0: c=g.sort_values(["plateau","score"],ascending=False)
+        plats.append(float(n.score.median()))
+        shares.append(float(((n.dev_pos>=4)&(n.dev_pf>1.0)).mean()))
+    g["plateau"]=plats; g["robust_neighbor_share"]=shares
+
+    # Strict no-overfit ranking: only 2020-24 used. 2025 and 2026 only reported afterward.
+    cand=g[(g.dev_pos>=4)&(g.dev_trades>=80)&(g.dev_pf>1.0)&(g.dev_dd>-.60)&(g.robust_neighbor_share>=.45)]
+    if len(cand)==0:
+        cand=g[(g.dev_pos>=4)&(g.dev_trades>=50)&(g.dev_pf>1.0)&(g.dev_dd>-.70)]
+    cand=cand.sort_values(["plateau","score"],ascending=False)
+
     top=[]
-    for rank,(_,x) in enumerate(c.head(15).iterrows(),1):
+    for rank,(_,x) in enumerate(cand.head(10).iterrows(),1):
         r=run(df,int(x.length),float(x.mult))
-        top.append({"dev_rank":rank,"length":int(x.length),"mult":float(x.mult),"plateau":float(x.plateau),
-                    "neighbor_positive_share":float(x.neighbor_positive_share),"dev":{"median_return":float(x["median"]),"worst_return":float(x.worst),
-                    "positive_years":int(x.posyears),"max_year_dd":float(x.maxyeardd),"trades":int(x.trades),"median_pf":float(x.medianpf)},
+        top.append({"dev_rank":rank,"length":int(x.length),"mult":float(x.mult),"plateau":float(x.plateau),"robust_neighbor_share":float(x.robust_neighbor_share),
+                    "development":stats_years(r,[2020,2021,2022,2023,2024]),
                     "y2025":r["annual"].get(2025,{}),"y2026":r["annual"].get(2026,{}),
-                    "full":{"return":r["return"],"maxdd":r["maxdd"],"pf":r["pf"],"trades":r["trades"]}})
-    sel=top[0]; L=sel["length"]; M=sel["mult"]
-    base=run(df,L,M); harsh=run(df,L,M,.001,20.0)
-    cur=run(df,5,4.5)
+                    "annual":r["annual"],"full":{"return":r["return"],"maxdd":r["maxdd"],"pf":r["pf"],"trades":r["trades"]}})
+
+    # Descriptive list specifically matching the user's tolerance: positive in >=5 of 6 completed years.
+    six=g[(g.six_pos>=5)&(g.dev_trades>=50)&(g.dev_pf>1.0)&(g.six_dd>-.75)].sort_values(["plateau","score"],ascending=False)
+    five=[]
+    for rank,(_,x) in enumerate(six.head(20).iterrows(),1):
+        r=run(df,int(x.length),float(x.mult))
+        five.append({"rank":rank,"length":int(x.length),"mult":float(x.mult),"six_positive_years":int(x.six_pos),
+                     "annual":{str(y):r["annual"].get(y,{}) for y in range(2020,2027)},
+                     "full":{"return":r["return"],"maxdd":r["maxdd"],"pf":r["pf"],"trades":r["trades"]},
+                     "plateau":float(x.plateau),"robust_neighbor_share":float(x.robust_neighbor_share)})
     out={"data":{"rows":len(df),"start":str(df.index[0]),"end":str(df.index[-1]),"source":"Binance spot BTCUSDT 15m via vaquum/HuggingFace"},
-         "execution":{"capital":CAP,"commission_pct":FEE*100,"slippage_usd":SLIP,"bar_model":"TradingView-like 4-tick OHLC","size":"100% equity","leverage":"1x"},
-         "protocol":{"development":"2020-2024 only","validation":"2025 untouched for ranking","report":"2026 untouched for ranking","grid":"length 2..30; multiplier 0.5..8.0 step 0.25",
-                     "eligibility":"4/5 positive dev years, >=40 dev closed trades, median annual PF>1, no dev-year DD worse than 50%",
-                     "selection":"highest median robustness score in ±2 length / ±0.5 multiplier neighborhood; OOS years not used to reorder"},
-         "selected":sel,"top15":top,"selected_baseline":base,"selected_harsh_costs":harsh,"current_5_4_5":cur}
+         "execution":{"capital":CAP,"commission_pct":FEE*100,"slippage_usd":SLIP,"bar_model":"TradingView default OHLC path with both stop orders allowed to fill sequentially","size":"100% equity","leverage":"1x"},
+         "protocol":{"grid":"length 2..40, multiplier 0.5..8.0 step 0.25","development":"2020-2024 used for ranking","oos":"2025 and 2026 not used to rank",
+                     "plateau":"median score within ±2 length and ±0.5 multiplier neighborhood"},
+         "top_dev_robust":top,"five_of_six":five,"count_five_of_six":int(len(six)),
+         "current_5_4_5":run(df,5,4.5)}
     Path("volty_results.json").write_text(json.dumps(out,indent=2))
-    g.sort_values(["plateau","score"],ascending=False).head(100).to_csv("volty_top100.csv",index=False)
+    g.to_csv("volty_top100.csv",index=False)
     print("RESULT_JSON_BEGIN"); print(json.dumps(out)); print("RESULT_JSON_END",flush=True)
 
 if __name__=="__main__": main(sys.argv[1])
