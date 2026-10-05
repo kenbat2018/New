@@ -187,7 +187,7 @@ def evaluate(mid,bid,ask,ofi,ticks,dayid,zwin,prwin,zth,pth,direction,fee,slip_t
         if d!=curday:
             # flatten at prior book before reset
             if pos>0:
-                px=bid[i-1]-slip_ticks*ticks[i]
+                px=bid[i-1]-slip_ticks*ticks[i-1]
                 before=entry_equity
                 cash=close_pos(cash,pos,px,fee)
                 pnl=cash-before
@@ -195,7 +195,7 @@ def evaluate(mid,bid,ask,ofi,ticks,dayid,zwin,prwin,zth,pth,direction,fee,slip_t
                 else: gl+=-pnl
                 trades+=1; pos=0.0
             elif pos<0:
-                px=ask[i-1]+slip_ticks*ticks[i]
+                px=ask[i-1]+slip_ticks*ticks[i-1]
                 before=entry_equity
                 cash=close_pos(cash,pos,px,fee)
                 pnl=cash-before
