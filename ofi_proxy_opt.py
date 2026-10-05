@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from numba import njit
-from huggingface_hub import snapshot_download
+
 
 REPO="ibrahimdaud/btcusdt-futures-features"
 TICK=0.01
@@ -18,14 +18,28 @@ P_THS=[0.0,100.0,500.0,1000.0,2500.0]
 def ema_alpha(n,b=1.0): return 2*b/(n+1)
 
 def load():
-    root=snapshot_download(REPO,repo_type="dataset",ignore_patterns=["raw/*"])
-    files=glob.glob(os.path.join(root,"features","BTCUSDT","*.parquet"))
-    if not files:
-        raise RuntimeError("No feature parquet files found")
+    import io, requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    dates=pd.date_range("2023-01-01","2026-05-31",freq="D")
+    base="https://huggingface.co/datasets/ibrahimdaud/binance-btcusdt/resolve/main/features/BTCUSDT"
+    def one(dt):
+        url=f"{base}/{dt.strftime('%Y-%m-%d')}.parquet?download=true"
+        r=requests.get(url,timeout=30)
+        if r.status_code!=200:
+            return None
+        try:
+            return pd.read_parquet(io.BytesIO(r.content),columns=["bar_time_ms","close","depth_imbalance_1pct"])
+        except Exception:
+            return None
     parts=[]
-    for f in files:
-        x=pd.read_parquet(f,columns=["bar_time_ms","close","depth_imbalance_1pct"])
-        parts.append(x)
+    with ThreadPoolExecutor(max_workers=32) as ex:
+        futs=[ex.submit(one,d) for d in dates]
+        for n,f in enumerate(as_completed(futs),1):
+            x=f.result()
+            if x is not None and len(x): parts.append(x)
+            if n%250==0: print("downloaded",n,"days; good",len(parts),flush=True)
+    if not parts:
+        raise RuntimeError("No feature parquet files downloaded")
     df=pd.concat(parts,ignore_index=True)
     df["ts"]=pd.to_datetime(df.bar_time_ms,unit="ms",utc=True)
     df=df.sort_values("ts").drop_duplicates("ts")
