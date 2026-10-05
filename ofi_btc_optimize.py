@@ -131,8 +131,12 @@ def load_day(date):
             "meta":{"date":date,"bytes":nbytes,"raw_rows":raw_rows,"kept_seconds":kept,
                     "grid_seconds":len(grid_bid),"url":url}}
 
+def tick_size_for_date(date):
+    # Binance USD-M BTCUSDT tick size changed from $0.01 to $0.10 on 2022-02-15 03:30 UTC.
+    return 0.01 if pd.Timestamp(date,tz="UTC") < pd.Timestamp("2022-02-15 03:30:00",tz="UTC") else 0.1
+
 def build_split(days, dates, cadence, depth_index):
-    mids=[]; bids=[]; asks=[]; ofis=[]; dayids=[]
+    mids=[]; bids=[]; asks=[]; ofis=[]; ticks=[]; dayids=[]
     did=0
     for date in dates:
         if date not in days: continue
@@ -142,14 +146,16 @@ def build_split(days, dates, cadence, depth_index):
         good=np.isfinite(b)&np.isfinite(a)&np.isfinite(o)&(a>=b)
         b=b[good]; a=a[good]; o=o[good]
         if len(b)<5: continue
-        mids.append((a+b)/2); bids.append(b); asks.append(a); ofis.append(o); dayids.append(np.full(len(b),did,dtype=np.int32))
+        mids.append((a+b)/2); bids.append(b); asks.append(a); ofis.append(o)
+        ticks.append(np.full(len(b),tick_size_for_date(date),dtype=np.float64))
+        dayids.append(np.full(len(b),did,dtype=np.int32))
         did+=1
     if not mids:
-        return tuple(np.array([]) for _ in range(5))
-    return np.concatenate(mids),np.concatenate(bids),np.concatenate(asks),np.concatenate(ofis),np.concatenate(dayids)
+        return tuple(np.array([]) for _ in range(6))
+    return np.concatenate(mids),np.concatenate(bids),np.concatenate(asks),np.concatenate(ofis),np.concatenate(ticks),np.concatenate(dayids)
 
 @njit(cache=True)
-def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,tick_size):
+def evaluate(mid,bid,ask,ofi,ticks,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks):
     if len(mid)==0: return (-9.,-9.,0.,-1.,0.,0.,0.,0.,0.)
     az=2.0/(zwin+1.0); ap=2.0/(prwin+1.0)
     curday=dayid[0]
@@ -181,7 +187,7 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
         if d!=curday:
             # flatten at prior book before reset
             if pos>0:
-                px=bid[i-1]-slip_ticks*tick_size
+                px=bid[i-1]-slip_ticks*ticks[i]
                 before=entry_equity
                 cash=close_pos(cash,pos,px,fee)
                 pnl=cash-before
@@ -189,7 +195,7 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
                 else: gl+=-pnl
                 trades+=1; pos=0.0
             elif pos<0:
-                px=ask[i-1]+slip_ticks*tick_size
+                px=ask[i-1]+slip_ticks*ticks[i]
                 before=entry_equity
                 cash=close_pos(cash,pos,px,fee)
                 pnl=cash-before
@@ -214,7 +220,7 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
             ez=z; initz=True
         else:
             ez=ap*z+(1.0-ap)*ez
-        pd=(mid[i]-last_mid)/tick_size
+        pd=(mid[i]-last_mid)/ticks[i]
         last_mid=mid[i]
         if not initpr:
             epr=pd; initpr=True
@@ -223,7 +229,7 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
 
         # Exit first, exactly matching the user's conditional order.
         if pos>0 and (ez<0.0 or epr<0.0):
-            px=bid[i]-slip_ticks*tick_size
+            px=bid[i]-slip_ticks*ticks[i]
             before=entry_equity
             cash=close_pos(cash,pos,px,fee); pos=0.0
             pnl=cash-before
@@ -231,7 +237,7 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
             else: gl+=-pnl
             trades+=1
         elif pos<0 and (ez>0.0 or epr>0.0):
-            px=ask[i]+slip_ticks*tick_size
+            px=ask[i]+slip_ticks*ticks[i]
             before=entry_equity
             cash=close_pos(cash,pos,px,fee); pos=0.0
             pnl=cash-before
@@ -242,11 +248,11 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
         # Then allow the new entry on the same sample.
         if pos==0.0:
             if ez>=zth and epr>=pth:
-                px=ask[i]+slip_ticks*tick_size
+                px=ask[i]+slip_ticks*ticks[i]
                 entry_equity=cash
                 cash,pos=open_long(cash,px,fee)
             elif direction==0 and ez<=-zth and epr<=-pth:
-                px=bid[i]-slip_ticks*tick_size
+                px=bid[i]-slip_ticks*ticks[i]
                 entry_equity=cash
                 cash,pos=open_short(cash,px,fee)
 
@@ -258,14 +264,14 @@ def evaluate(mid,bid,ask,ofi,dayid,zwin,prwin,zth,pth,direction,fee,slip_ticks,t
     # final day flatten
     i=len(mid)-1
     if pos>0:
-        px=bid[i]-slip_ticks*tick_size
+        px=bid[i]-slip_ticks*ticks[i]
         before=entry_equity; cash=close_pos(cash,pos,px,fee)
         pnl=cash-before
         if pnl>0: gp+=pnl; wins+=1
         else: gl+=-pnl
         trades+=1
     elif pos<0:
-        px=ask[i]+slip_ticks*tick_size
+        px=ask[i]+slip_ticks*ticks[i]
         before=entry_equity; cash=close_pos(cash,pos,px,fee)
         pnl=cash-before
         if pnl>0: gp+=pnl; wins+=1
@@ -302,7 +308,7 @@ def evaluate_config(cache, split, c, fee=BASE_FEE, slip=BASE_SLIP_TICKS):
         dates=DEV_DATES if split=="dev" else BACK_DATES if split=="back" else FWD_DATES
         cache[key]=build_split(DAYS,dates,cadence,di)
     arr=cache[key]
-    t=evaluate(*arr,zwin,prwin,zth,pth,direction,fee,slip,TICK_SIZE)
+    t=evaluate(*arr,zwin,prwin,zth,pth,direction,fee,slip)
     return metrics_tuple(t)
 
 def one_step_neighbors(c):
@@ -406,7 +412,7 @@ def main():
               "dev_dates":have_dev,"backward_oos_dates":[d for d in BACK_DATES if d in DAYS],"forward_oos_dates":have_fwd,
               "ledger":ledger},
       "execution":{"fill":"buy/cover at best ask; sell/short at best bid; plus adverse tick slippage",
-                   "fee_per_side":BASE_FEE,"slippage_ticks":BASE_SLIP_TICKS,"tick_size":TICK_SIZE,
+                   "fee_per_side":BASE_FEE,"slippage_ticks":BASE_SLIP_TICKS,"tick_size":"dynamic: $0.01 before 2022-02-15 03:30 UTC, $0.10 after",
                    "position_size":"100% equity, 1x notional","day_handling":"positions flattened at end of each isolated sample day"},
       "search":{"random_configs":len(configs),
                 "cadences_seconds":CADENCES.tolist(),"depths":DEPTHS.tolist(),"z_windows":ZWINS.tolist(),"pr_windows":PRWINS.tolist(),
