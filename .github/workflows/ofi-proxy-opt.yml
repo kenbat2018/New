@@ -1,0 +1,22 @@
+name: ofi-proxy-opt
+on:
+  push:
+    paths:
+      - ".github/workflows/ofi-proxy-opt.yml"
+      - "ofi_proxy_opt.py"
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q numpy pandas pyarrow numba huggingface_hub
+      - run: python ofi_proxy_opt.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ofi-proxy-results
+          path: ofi_proxy_results.json
