@@ -28,8 +28,8 @@ def feats(ofi,price,zw,pw,bias):
     return ez,ep
 
 def bounds(ts):
-    arr=ts.astype("int64").to_numpy()
-    def ix(d): return int(np.searchsorted(arr,pd.Timestamp(d,tz="UTC").value))
+    arr=np.array(ts.values.astype("datetime64[ns]"))
+    def ix(d): return int(np.searchsorted(arr,np.datetime64(d)))
     return ix("2023-01-01"),ix("2024-01-01"),ix("2025-01-01"),ix("2026-01-01"),len(arr)
 
 def train_score(y23,y24,tr):
