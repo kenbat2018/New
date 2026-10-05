@@ -1,0 +1,52 @@
+name: ofi-btc-oos-best
+on:
+  push:
+    paths:
+      - ".github/workflows/ofi-btc-oos-best.yml"
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q numpy pandas numba requests
+      - name: Test frozen best raw dev candidate OOS
+        run: |
+          python - <<'PY'
+          import json, time
+          import ofi_btc_optimize as m
+          m.DAYS={}
+          dates=m.BACK_DATES+m.FWD_DATES
+          ledger=[]
+          for d in dates:
+              t=time.time()
+              try:
+                  x=m.load_day(d); m.DAYS[d]=x
+                  ledger.append({"date":d,"status":"ok","seconds":time.time()-t})
+                  print("DAY",d,"ok",flush=True)
+              except Exception as e:
+                  ledger.append({"date":d,"status":"error","error":str(e)})
+                  print("DAY",d,"ERR",e,flush=True)
+          cache={}
+          candidates={
+            "best_raw_dev":[900,1,2,3,0.4,5.0,0],
+            "best_robustish":[900,5,21,10,0.4,0.0,1],
+            "original_like":[900,25,5,10,0.2,0.2,0]
+          }
+          out={"ledger":ledger,"results":{}}
+          for name,c in candidates.items():
+              c=tuple(c)
+              out["results"][name]={
+                "config":c,
+                "back":m.evaluate_config(cache,"back",c),
+                "fwd":m.evaluate_config(cache,"fwd",c),
+                "fwd_harsh":m.evaluate_config(cache,"fwd",c,m.HARSH_FEE,m.HARSH_SLIP_TICKS)
+              }
+          print("OOS_JSON_BEGIN")
+          print(json.dumps(out))
+          print("OOS_JSON_END")
+          PY
