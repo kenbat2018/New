@@ -5,11 +5,11 @@ import pandas as pd
 from numba import njit
 
 
-REPO="ibrahimdaud/btcusdt-futures-features"
+REPO="ibrahimdaud/binance-btcusdt"
 TICK=0.01
 FEE=0.0005
 SLIP_BPS=1.0
-TFS={"5m":1,"15m":3,"30m":6,"1h":12,"2h":24,"4h":48,"6h":72,"12h":144,"1d":288}
+TFS={"5m":1,"10m":2,"15m":3,"30m":6,"1h":12,"2h":24,"4h":48,"6h":72,"12h":144,"1d":288}
 Z_WINS=[3,5,8,13,21]
 PR_WINS=[3,5,10,20]
 Z_THS=[0.10,0.20,0.35,0.50,0.75]
