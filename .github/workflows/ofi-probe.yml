@@ -1,0 +1,20 @@
+name: ofi-probe
+on:
+  push:
+    paths:
+      - ".github/workflows/ofi-probe.yml"
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe Tardis sample
+        run: |
+          set -x
+          curl -sI -L "https://datasets.tardis.dev/v1/binance-futures/book_snapshot_25/2024/01/01/BTCUSDT.csv.gz" | tee headers.txt
+          python - <<'PY'
+          import requests
+          u="https://datasets.tardis.dev/v1/binance-futures/book_snapshot_25/2024/01/01/BTCUSDT.csv.gz"
+          r=requests.get(u,stream=True,timeout=30)
+          print("status",r.status_code,"len",r.headers.get("content-length"),"type",r.headers.get("content-type"))
+          PY
