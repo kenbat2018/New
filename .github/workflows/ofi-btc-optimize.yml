@@ -1,0 +1,26 @@
+name: ofi-btc-optimize
+on:
+  push:
+    paths:
+      - ".github/workflows/ofi-btc-optimize.yml"
+      - "ofi_btc_optimize.py"
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -q numpy pandas numba requests
+      - name: Run BTC L2 OFI optimization
+        run: python ofi_btc_optimize.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ofi-btc-results
+          path: |
+            ofi_btc_optimization.json
+            ofi_btc_top250.csv
