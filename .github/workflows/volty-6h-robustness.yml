@@ -1,0 +1,28 @@
+name: volty-6h-robustness
+on:
+  push:
+    paths:
+      - ".github/workflows/volty-6h-robustness.yml"
+      - "volty_6h_robustness.py"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -q numpy pandas numba
+      - name: Run 6h robustness study
+        run: python volty_6h_robustness.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volty-6h-robustness
+          path: |
+            volty_6h_robustness.json
+            volty_6h_robustness.csv
+            volty_6h_download_ledger.json
